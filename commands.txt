@@ -1,0 +1,17 @@
+Сервер:
+python3 p2p_tls_peer.py host --bind 0.0.0.0 --port 60000
+
+Клиент:
+python3 p2p_tls_peer.py connect --host 192.168.163.136 --port 60000 --cafile certs/server.crt
+
+Сниффер:
+
+cd Desktop\code\Kripta
+
+ - режим блокировки
+
+python tls_sniffer_blocker.py --alice-ip 192.168.163.136 --bob-ip 192.168.163.137 --port 60000 --mode rst
+
+ - режим перехвата
+
+python tls_sniffer_blocker.py --alice-ip 192.168.163.136 --bob-ip 192.168.163.137 --port 60000 --mode sniff

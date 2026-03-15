@@ -1,6 +1,7 @@
 ﻿import argparse
 import json
 import os
+import queue
 import socket
 import ssl
 import struct
@@ -270,22 +271,44 @@ def receive_loop(connection: ssl.SSLSocket, stop_event: threading.Event) -> None
     stop_event.set()
 
 
+def input_loop(
+    prompt: str, out_queue: "queue.Queue[str]", stop_event: threading.Event
+) -> None:
+    while not stop_event.is_set():
+        try:
+            message = input(prompt)
+        except EOFError:
+            out_queue.put("/exit")
+            break
+        except KeyboardInterrupt:
+            out_queue.put("/exit")
+            break
+        out_queue.put(message.strip())
+
+
 def chat(connection: ssl.SSLSocket, my_name: str, peer_name: str) -> None:
     stop_event = threading.Event()
     exit_sent = False
+    outgoing: "queue.Queue[str]" = queue.Queue()
     receiver = threading.Thread(
         target=receive_loop, args=(connection, stop_event), daemon=True
     )
+    input_reader = threading.Thread(
+        target=input_loop,
+        args=(f"{my_name}> ", outgoing, stop_event),
+        daemon=True,
+    )
     receiver.start()
+    input_reader.start()
 
     print(f"TLS channel is active. You are '{my_name}', peer is '{peer_name}'.")
     print("Type '/exit' to close connection.")
     try:
         while not stop_event.is_set():
             try:
-                message = input(f"{my_name}> ").strip()
-            except EOFError:
-                break
+                message = outgoing.get(timeout=0.2)
+            except queue.Empty:
+                continue
 
             if not message:
                 continue
@@ -327,23 +350,35 @@ def run_host(bind_ip: str, port: int, cert: Path, key: Path, my_name: str) -> No
     context = create_server_context(cert, key)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.settimeout(1.0)
         listener.bind((bind_ip, port))
-        listener.listen(1)
+        listener.listen(5)
         print(f"Listening on {bind_ip}:{port}")
-        print("Waiting for peer...")
 
-        raw_socket, addr = listener.accept()
-        with raw_socket:
-            with context.wrap_socket(raw_socket, server_side=True) as tls_socket:
-                print(f"Peer connected: {addr[0]}:{addr[1]}")
-                print(
-                    f"TLS established: protocol={tls_socket.version()}, "
-                    f"cipher={tls_socket.cipher()[0]}"
-                )
-                peer_name = exchange_names_as_host(tls_socket, my_name)
-                print(f"Name exchange complete: peer is '{peer_name}'.")
-                chat(tls_socket, my_name=my_name, peer_name=peer_name)
+        while True:
+            print("Waiting for peer...")
+            try:
+                raw_socket, addr = listener.accept()
+            except socket.timeout:
+                continue
+            except KeyboardInterrupt:
+                print("\nServer stopped by user.")
+                break
 
+            with raw_socket:
+                try:
+                    with context.wrap_socket(raw_socket, server_side=True) as tls_socket:
+                        print(f"Peer connected: {addr[0]}:{addr[1]}")
+                        print(
+                            f"TLS established: protocol={tls_socket.version()}, "
+                            f"cipher={tls_socket.cipher()[0]}"
+                        )
+                        peer_name = exchange_names_as_host(tls_socket, my_name)
+                        print(f"Name exchange complete: peer is '{peer_name}'.")
+                        chat(tls_socket, my_name=my_name, peer_name=peer_name)
+                        print("Session finished. Ready for next connection.")
+                except (ssl.SSLError, ConnectionError, OSError, ValueError) as exc:
+                    print(f"Connection error: {exc}")
 
 def run_connect(
     host: str, port: int, cafile: Path | None, insecure: bool, my_name: str
@@ -407,3 +442,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
