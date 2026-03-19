@@ -201,7 +201,6 @@ def create_client_context(cafile_path: Path | None, insecure: bool) -> ssl.SSLCo
 
     context = ssl.create_default_context(cafile=str(cafile_path))
     context.minimum_version = ssl.TLSVersion.TLSv1_2
-    # Useful for labs with self-signed certs and IP-based connection.
     context.check_hostname = False
     context.verify_mode = ssl.CERT_REQUIRED
     return context

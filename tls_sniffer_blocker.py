@@ -1,6 +1,7 @@
 import argparse
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 from scapy.all import IP, TCP, Raw, conf, send, sniff
 
@@ -124,10 +125,6 @@ def send_rst_for_packet(pkt: Any, iface: str | None) -> None:
     send(rst_to_src, iface=iface, verbose=False, count=2)
 
 
-def build_filter(alice_ip: str, bob_ip: str, port: int) -> str:
-    return f"tcp and host {alice_ip} and host {bob_ip} and port {port}"
-
-
 def resolve_capture_ifaces(
     iface_arg: str | None, alice_ip: str, bob_ip: str
 ) -> str | list[str]:
@@ -152,12 +149,42 @@ def resolve_capture_ifaces(
     return conf.iface
 
 
+def on_packet(pkt: Any, stats: Stats, tls_only: bool, block_mode: str, rst_iface: str | None,) -> None:
+    if IP not in pkt or TCP not in pkt:
+        return
+
+    ip = pkt[IP]
+    tcp = pkt[TCP]
+    stats.packets_seen += 1
+
+    payload = b""
+    if Raw in pkt:
+        payload = bytes(pkt[Raw].load)
+
+    is_tls, tls_info = detect_tls(payload)
+    if tls_only and not is_tls:
+        return
+
+    direction = f"{ip.src}:{tcp.sport} -> {ip.dst}:{tcp.dport}"
+    flags = str(tcp.flags)
+    if is_tls:
+        stats.tls_packets_seen += 1
+        print(f"\n[TLS] {direction} | flags={flags} | {tls_info}")
+    else:
+        print(f"\n[TCP] {direction} | flags={flags} | payload_len={len(payload)}")
+
+    if block_mode == "rst":
+        send_rst_for_packet(pkt, rst_iface)
+        stats.blocked_packets += 1
+        print(f"\n[BLOCK] Sent TCP RST packets for flow {direction}")
+
+
 def main() -> None:
     args = parse_args()
     stats = Stats(started_at=time.time())
 
     iface = resolve_capture_ifaces(args.iface, args.alice_ip, args.bob_ip)
-    bpf_filter = build_filter(args.alice_ip, args.bob_ip, args.port)
+    bpf_filter = f"tcp and host {args.alice_ip} and host {args.bob_ip} and port {args.port}"
     tls_only = not args.no_tls_only
     block_mode = args.mode
 
@@ -165,43 +192,19 @@ def main() -> None:
     print(f"BPF filter: {bpf_filter}")
     print(f"Mode: {block_mode}")
     print("Press Ctrl+C to stop.")
-
-    def on_packet(pkt: Any) -> None:
-        nonlocal stats
-
-        if IP not in pkt or TCP not in pkt:
-            return
-
-        ip = pkt[IP]
-        tcp = pkt[TCP]
-        stats.packets_seen += 1
-
-        payload = b""
-        if Raw in pkt:
-            payload = bytes(pkt[Raw].load)
-
-        is_tls, tls_info = detect_tls(payload)
-        if tls_only and not is_tls:
-            return
-
-        direction = f"{ip.src}:{tcp.sport} -> {ip.dst}:{tcp.dport}"
-        flags = str(tcp.flags)
-        if is_tls:
-            stats.tls_packets_seen += 1
-            print(f"\n[TLS] {direction} | flags={flags} | {tls_info}")
-        else:
-            print(f"\n[TCP] {direction} | flags={flags} | payload_len={len(payload)}")
-
-        if block_mode == "rst":
-            send_rst_for_packet(pkt, args.iface)
-            stats.blocked_packets += 1
-            print(f"\n[BLOCK] Sent TCP RST packets for flow {direction}")
+    packet_handler = partial(
+        on_packet,
+        stats=stats,
+        tls_only=tls_only,
+        block_mode=block_mode,
+        rst_iface=args.iface,
+    )
 
     try:
         sniff(
             iface=iface,
             filter=bpf_filter,
-            prn=on_packet,
+            prn=packet_handler,
             store=False,
         )
     except PermissionError:
